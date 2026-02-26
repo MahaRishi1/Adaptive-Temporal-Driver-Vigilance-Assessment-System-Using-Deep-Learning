@@ -61,7 +61,7 @@ Follow these steps to run the project.
 
 Download Python 3.11.4 from:
 
-[https://www.python.org/downloads/release/python-3114/](https://www.python.org/downloads/release/python-3114/)
+[https://www.python.org/ftp/python/3.11.4/python-3.11.4-amd64.exe](https://www.python.org/ftp/python/3.11.4/python-3.11.4-amd64.exe)
 
 During installation:
 
