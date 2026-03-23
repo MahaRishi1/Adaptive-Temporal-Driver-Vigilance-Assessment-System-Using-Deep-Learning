@@ -254,6 +254,9 @@ def calculate_MAR(mouth_pts: list) -> float:
 _alarm_active  = False
 _alarm_lock    = threading.Lock()
 
+last_alert_time = 0
+ALERT_COOLDOWN = 5   # seconds (prevents spamming)
+
 def _alarm_loop():
     while True:
         with _alarm_lock:
@@ -437,6 +440,7 @@ while True:
 
         # ---- Mouth / Yawn ----
         mouth_pts = [pt(i) for i in MOUTH_LANDMARKS]
+        mouth_width = dist.euclidean(mouth_pts[0], mouth_pts[1])
         for p in mouth_pts: cv2.circle(frame, p, 2, (255, 0, 0), -1)
 
         raw_mar = calculate_MAR(mouth_pts)
@@ -447,40 +451,52 @@ while True:
         if MAR_THRESHOLD is None:
             mar_calib_buf.append(smooth_mar)
             if len(mar_calib_buf) >= 150:
-                baseline_mar  = float(np.median(mar_calib_buf))
-                MAR_THRESHOLD = baseline_mar * MAR_CALIB_MULTIPLIER
-                print(f"MAR Threshold : {MAR_THRESHOLD:.4f}")
+                baseline_mar = float(np.median(mar_calib_buf))
+
+                # Prevent wrong calibration (too small values)
+                baseline_mar = max(baseline_mar, 0.25)
+
+                # Better multiplier
+                MAR_THRESHOLD = baseline_mar * 1.4
+
+                print(f"Baseline MAR : {baseline_mar:.3f}")
+                print(f"MAR Threshold: {MAR_THRESHOLD:.3f}")
         else:
             # Stronger Yawn Detection
 
-            if MAR_THRESHOLD is not None:
+            # ============================================================
+            # BALANCED YAWN DETECTION (FINAL)
+            # ============================================================
 
-                # Must be significantly above threshold
-                # TRUE YAWN DETECTION (robust against talking)
+            if 'MAR_HISTORY' not in globals():
+                MAR_HISTORY = deque(maxlen=10)
 
-                mouth_width = dist.euclidean(mouth_pts[0], mouth_pts[1])
+            MAR_HISTORY.append(smooth_mar)
 
-                if smooth_mar > MAR_THRESHOLD * 1.35 and mouth_width > 40:
+            # Stability check (talking = unstable, yawning = stable)
+            mar_variance = np.var(MAR_HISTORY) if len(MAR_HISTORY) > 5 else 0
 
-                    current_yawn_frames += 1
+            # Slightly relaxed threshold
+            if (
+                smooth_mar > MAR_THRESHOLD * 1.25 and   # not too strict
+                mouth_width > 35 and                    # face distance check
+                mar_variance < 0.01                     # allow some variation
+            ):
+                current_yawn_frames += 1
+            else:
+                current_yawn_frames = max(0, current_yawn_frames - 2)
 
-                else:
+            # Confirm yawn (moderate duration)
+            if current_yawn_frames >= 15:
+                yawn_detected = True
 
-                    current_yawn_frames = max(0, current_yawn_frames - 2)
-
-
-                # Confirm real yawn (must last long)
-                if current_yawn_frames >= 20:
-
-                    yawn_detected = True
-
-                    cv2.putText(frame,
-                                "YAWNING!",
-                                (x_min, y_min - 45),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                0.75,
-                                (0, 0, 255),
-                                2)
+                cv2.putText(frame,
+                            "YAWNING!",
+                            (x_min, y_min - 45),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.75,
+                            (0, 0, 255),
+                            2)
 
         # ---- Head Pose (solvePnP-based with fallback) ----
         nose        = pt(NOSE_TIP)
@@ -569,6 +585,28 @@ while True:
         )
         alert_level = fatigue_index.get_alert_level()
 
+        # ============================================================
+        # Mild Drowsiness Alert (NORMAL → LOW)
+        # ============================================================
+
+        current_time = time.time()
+
+        if alert_level == "LOW":
+
+            if current_time - last_alert_time > ALERT_COOLDOWN:
+
+                print("Please stay Alert, Mild Drowsiness detected")
+
+                cv2.putText(frame,
+                            "Please stay Alert, Mild Drowsiness detected",
+                            (30, 280),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.6,
+                            (0, 255, 255),
+                            2)
+
+                last_alert_time = current_time
+
         # ---- State machine ----
         # ---- Improved Head Down Detection ----
 
@@ -584,17 +622,27 @@ while True:
 
             # MUCH MORE RELIABLE COLLAPSE DETECTION
 
-            if nose_relative > 0.72:
+            # ---- Improved Head Down Detection ----
 
-                head_down_frames += 2
+            face_height = abs(chin_pt[1] - forehead[1])
 
-            elif smooth_pitch > 18:
+            if face_height > 10:
 
-                head_down_frames += 1
+                nose_relative = (nose[1] - forehead[1]) / face_height
 
-            else:
+                # 🚫 Skip head-down during yawning
+                if yawn_detected:
+                    head_down_frames = max(0, head_down_frames - 2)
 
-                head_down_frames = max(0, head_down_frames - 2)
+                else:
+                    if nose_relative > 0.70:
+                        head_down_frames += 2
+
+                    elif smooth_pitch > 18:
+                        head_down_frames += 1
+
+                    else:
+                        head_down_frames = max(0, head_down_frames - 1)
 
         # ---- State Machine ----
         if consec_counter >= CONSEC_FRAMES:
